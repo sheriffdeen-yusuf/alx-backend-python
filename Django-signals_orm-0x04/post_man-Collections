@@ -1,0 +1,36 @@
+{
+  "id": "django-messaging-api-env",
+  "name": "Django Messaging API",
+  "values": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000/api",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "secret",
+      "enabled": true
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "secret",
+      "enabled": true
+    },
+    {
+      "key": "username",
+      "value": "u4",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "password",
+      "value": "pass123",
+      "type": "secret",
+      "enabled": true
+    }
+  ]
+}
