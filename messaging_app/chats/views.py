@@ -1,55 +1,134 @@
-from django.shortcuts import render
-from rest_framework import viewsets, filters
+from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.authentication import SessionAuthentication, TokenAuthentication
-from .models import Message, Conversation
-from .serializers import MessageSerializer, ConversationSerializer
+from django.shortcuts import render, get_object_or_404
 
-class UserViewSet(viewsets.ModelViewSet):
-    """
-    A viewset for viewing and editing user instances.
-    """
-    from .models import User
-    from .serializers import UserSerializer
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
+from .models import User, Conversation, Message
+from .serializers import (
+    UserSerializer,
+    ConversationSerializer,
+    MessageSerializer,
+)
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework import exceptions
+from .permissions import IsParticipantOfConversation
+from .filters import MessageFilter
+from .pagination import MessagePagination
+
+
+# --------------------
+# Conversation ViewSet
+# --------------------
+
 
 class ConversationViewSet(viewsets.ModelViewSet):
-    """
-    A viewset for viewing and creating conversations.
-    """
-    queryset = Conversation.objects.all()
+    permission_classes = [IsAuthenticated, IsParticipantOfConversation]
+
+    def get_queryset(self):
+        # Only return conversations where the user is a participant
+        user = self.request.user
+        if user.is_authenticated:
+            return (
+                Conversation.objects.filter(participants=user)
+                .prefetch_related("participants", "messages")
+            )
+        return Conversation.objects.none()
     serializer_class = ConversationSerializer
-    authentication_classes = [SessionAuthentication, TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-    
-    def perform_create(self, serializer):
-        serializer.save(participants_id=self.request.user)
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["participants__email"]
+
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new conversation with participants.
+        Expected JSON:
+        {
+            "participants": [
+                "user_id1",
+                "user_id2",
+                ...
+            ]
+        }
+        """
+        participant_ids = request.data.get("participants", [])
+        if len(participant_ids) < 2:
+            return Response(
+                {"error": "A conversation must have atleast 2 participants."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        participants = User.objects.filter(user_id__in=participant_ids)
+        if participants.count() != len(participant_ids):
+            return Response(
+                {"error": "One or more participants do not exist."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        conversation = Conversation.objects.create()
+        conversation.participants.set(participants)
+        serializer = self.get_serializer(conversation)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# ---------------------
+# Message ViewSet
+# ---------------------
+
 
 class MessageViewSet(viewsets.ModelViewSet):
-    """
-    A viewset for viewing and creating messages.
-    """
-    queryset = Message.objects.all()
+
+    permission_classes = [IsAuthenticated, IsParticipantOfConversation]
+    filterset_class = MessageFilter
+    pagination_class = MessagePagination
+
+    def handle_exception(self, exc):
+        if isinstance(exc, exceptions.PermissionDenied):
+            return Response(
+                {"detail": "Forbidden"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().handle_exception(exc)
+
+    def get_queryset(self):
+        # Only return messages in conversations the user participates in
+        user = self.request.user
+        if user.is_authenticated:
+            return (
+                Message.objects.filter(conversation__participants=user)
+                .select_related("sender", "conversation")
+            )
+        return Message.objects.none()
     serializer_class = MessageSerializer
     filter_backends = [filters.SearchFilter]
-    search_fields = ['message_body']
-    authentication_classes = [SessionAuthentication, TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-    
-    def perform_create(self, serializer):
-        serializer.save(sender_id=self.request.user)
-    
+    search_fields = ["message_body"]
+
     def create(self, request, *args, **kwargs):
-        conversation_id = request.data.get('conversation_id')
-        try:
-            conversation = Conversation.objects.get(conversation_id=conversation_id)
-        except Conversation.DoesNotExist:
-            return Response({'error': 'Conversation not found.'}, status=404)
-        
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        return Response(serializer.data, status=201)
-    
+        """
+        Send a new message in a conversation.
+        Expected JSON:
+        {
+            "conversation": "conversation_id",
+            "message_body": "",
+            "sender": "user_id"
+        }
+        """
+        conversation_id = request.data.get.get("conversation")
+        sender_id = request.data.get("sender")
+        message_body = request.data.get("message_body")
+
+        if not conversation_id or not sender_id or not message_body:
+            return Response(
+                {
+                    "error": (
+                        "conversation, sender, and message_body are required."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        message = Message.objects.create(
+            conversation_id=conversation_id,
+            sender_id=sender_id,
+            message_body=message_body,
+        )
+        serializer = self.get_serializer(message)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)

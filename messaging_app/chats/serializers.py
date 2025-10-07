@@ -1,41 +1,81 @@
 from rest_framework import serializers
-from .models import User, Message, Conversation
+from .models import User, Conversation, Message
+
+# --------------------------
+# User Serializer
+# --------------------------
+
 
 class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+
     class Meta:
         model = User
-        password = serializers.CharField(write_only=True)
-        fields = ['user_id', 'first_name',
-                  'last_name', 'email',
-                  'phone_number', 'role']
-        read_only_fields = ['user_id', 'created_at']
-        
+        fields = [
+            "user_id",
+            "first_name",
+            "last_name",
+            "email",
+            "phone_number",
+            "role",
+            "created_at",
+            "full_name",
+        ]
+
+# --------------------------
+# Message Serializer
+# --------------------------
+
+
 class MessageSerializer(serializers.ModelSerializer):
-    sender = UserSerializer(source='sender_id', read_only=True)
+    sender = UserSerializer(read_only=True)
+
     class Meta:
         model = Message
-        fields = ['message_id', 'sender', 'message_body', 'sent_at']
-        read_only_fields = ['message_id', 'sent_at']
+        fields = [
+            "message_id",
+            "conversation",
+            "sender",
+            "message_body",
+            "sent_at",
+        ]
+        extra_kwargs = {
+            "conversation": {"write_only": True},
+        }
+
+# --------------------------
+# Conversation Serializer
+# --------------------------
+
 
 class ConversationSerializer(serializers.ModelSerializer):
-    participants = UserSerializer(many=True, read_only=True, source='participants_id')
-    messages = MessageSerializer(many=True, read_only=True)
-    total_messages = serializers.SerializerMethodField()
+    participants = UserSerializer(many=True, read_only=True)
+    messages = serializers.SerializerMethodField()
+
     class Meta:
         model = Conversation
-        fields = ['conversation_id', 'participants', 'messages', 'created_at']
-        read_only_fields = ['conversation_id', 'created_at']
-    
-    def get_total_messages(self, obj):
-        return obj.messages.count()
-    
+        fields = [
+            "conversation_id",
+            "participants",
+            "created_at",
+            "messages",
+        ]
+
+    def get_messages(self, obj):
+        """
+        Return message for this conversation using nested MessageSerializer.
+        """
+        messages = obj.messages.all().order_by("sent_at")
+        return MessageSerializer(messages, many=True).data
+
     def validate(self, data):
         """
-        Custom validation to ensure that a user cannot create a conversation with themselves.
+        Example custom validation: conversations
+        must have atleast 2 participants.
         """
-        request = self.context.get('request')
-        if request and request.user in data.get('participants_id', []):
-            raise serializers.ValidationError("You cannot create a conversation with yourself.")
+        participants = data.get("participants", [])
+        if len(participants) < 2:
+            raise serializers.ValidationError(
+                "A conversation must have atleast 2 participants."
+            )
         return data
-
-
