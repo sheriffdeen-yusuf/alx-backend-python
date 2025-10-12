@@ -1,21 +1,23 @@
 from django.urls import path, include
-# from rest_framework import routers
-from rest_framework_nested import routers
-from .views import ConversationViewSet, MessageViewSet
+from rest_framework import routers
+from rest_framework_nested.routers import NestedDefaultRouter
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
+from .views import UserViewSet, ConversationViewSet, MessageViewSet
 
-# Base router for conversations
 router = routers.DefaultRouter()
-router.register(r"conversations", ConversationViewSet, basename="conversations")
+router.register(r'users', UserViewSet, basename='user')
+router.register(r'conversations', ConversationViewSet, basename='conversation')
+router.register(r'messages', MessageViewSet, basename='message')
 
-# Nested router: messages belong to conversations
-conversation_router = routers.NestedDefaultRouter(
-    router, r"conversations",
-    lookup="conversation"
-    )
-router.register(r"messages", MessageViewSet, basename="message")
-
-# urlpatterns = [
-#     path("", include(router.urls)),
-# ]
-
-urlpatterns = router.urls + conversation_router.urls
+# Nested router to handle messages within conversations
+conversation_router = NestedDefaultRouter(router, r'conversations', lookup='conversation')
+conversation_router.register(r'messages', MessageViewSet, basename='conversation-messages')
+urlpatterns = [
+    path('', include(router.urls)),
+    path('', include(conversation_router.urls)),
+    path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+]

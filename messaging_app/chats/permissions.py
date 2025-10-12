@@ -1,31 +1,23 @@
-
 from rest_framework import permissions
+from .models import Conversation, Message
 
-
+# Custom permission to allow only if the user is authenticated and is a participant in the conversation
 class IsParticipantOfConversation(permissions.BasePermission):
-    """
-    Allows access only to authenticated users who are participants
-    in the conversation.
-    """
-
     def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
-
-    def has_object_permission(self, request, view, obj):
-        user = request.user
-        # Safe methods (GET, HEAD, OPTIONS) are allowed for participants
-        if request.method in permissions.SAFE_METHODS:
-            if hasattr(obj, 'participants'):
-                return user in obj.participants.all()
-            if hasattr(obj, 'conversation'):
-                return user in obj.conversation.participants.all()
+        # Allow access only to authenticated users
+        if not request.user or not request.user.is_authenticated:
             return False
-        # PUT, PATCH, DELETE are only allowed for participants
-        if request.method in ["PUT", "PATCH", "DELETE"]:
-            if hasattr(obj, 'participants'):
-                return user in obj.participants.all()
-            if hasattr(obj, 'conversation'):
-                return user in obj.conversation.participants.all()
-            return False
-        # POST is allowed for authenticated users (handled by has_permission)
         return True
+    def has_object_permission(self, request, view, obj):
+        # A user can access the conversation if they are a participant
+        if isinstance(obj, Conversation):
+            return request.user in obj.participants.all()
+        # A user can view or modify a message if they are the sender
+        if isinstance(obj, Message):
+            # A user can view message if they are a participant in the conversation
+            if request.method == 'GET':
+                return request.user in obj.conversation_id.participants.all()
+            # A user can modify message if they are the sender
+            if request.method in ['PUT', 'DELETE', 'PATCH']:
+                return obj.sender_id == request.user
+        return False
