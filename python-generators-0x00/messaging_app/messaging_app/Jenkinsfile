@@ -1,0 +1,208 @@
+pipeline {
+    agent any
+    
+    tools {
+        python('python3')
+    }
+
+    parameters {
+        choice(
+            name: 'BRANCH',
+            choices: ['main', 'develop', 'release/v1.0'],
+            description: 'Select the branch to build'
+        )
+        string(
+            name: 'CUSTOM_BRANCH',
+            defaultValue: '',
+            description: ''
+        )
+        string(
+            name: 'DOCKER_IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker image tag (default: latest)'
+        )
+    }
+    
+    environment {
+        GITHUB_CREDENTIALS = credentials('github-credentials')
+        APP_DIR = 'messaging_app'
+        DOCKER_CREDENTIALS = credentials('dockerhub-credentials')
+        TARGET_BRANCH = "${params.CUSTOM_BRANCH ?: params.BRANCH}"
+        DOCKER_IMAGE_NAME = "beloveo/your-messaging-app"
+        DOCKER_REGISTRY = "docker.io"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                git(
+                    url: 'https://github.com/BeloveO/alx-backend-python.git',
+                    credentialsId: 'github-credentials',
+                    git branch: 'master'
+                )
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'python -m pip3 install --upgrade pip'
+                    sh 'pip3 install -r messaging_app/requirements.txt'
+                    sh 'pip3 install pytest pytest-html'
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'pytest --junitxml=test-results.xml --html=test-report.html --self-contained-html'
+                }
+            }
+            post {
+                always {
+                    dir("${APP_DIR}") {
+                        junit 'test-results.xml'
+                        publishHTML(target: [
+                            reportName: 'Test Report',
+                            reportDir: '.',
+                            reportFiles: 'test-report.html',
+                            keepAll: true,
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true
+                        ])
+                    }
+                }
+            }
+        }
+    }
+
+    stage('Build Docker Image') {
+            steps {
+                dir('messaging-app') {
+                    script {
+                        echo "Building Docker image: ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG}"
+                        
+                        // Check if Dockerfile exists
+                        sh '''
+                            if [ -f Dockerfile ]; then
+                                echo "Dockerfile found, building image..."
+                            else
+                                echo "ERROR: Dockerfile not found in messaging-app directory!"
+                                exit 1
+                            fi
+                        '''
+                        
+                        // Build the Docker image
+                        sh "docker build -t ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG} ."
+                        
+                        // Also tag with branch name for reference
+                        sh "docker tag ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG} ${env.DOCKER_IMAGE_NAME}:${env.TARGET_BRANCH.replace('/', '-')}"
+                    }
+                }
+            }
+            post {
+                success {
+                    echo "✅ Docker image built successfully"
+                    sh "docker images | grep ${env.DOCKER_IMAGE_NAME}"
+                }
+                failure {
+                    echo "❌ Docker build failed"
+                }
+            }
+        }
+        
+        stage('Test Docker Image') {
+            steps {
+                script {
+                    echo "Testing Docker image..."
+                    // Run a quick test to ensure the container starts
+                    sh """
+                        docker run --rm -d --name test-container ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG} || echo "Container might not be long-running"
+                        sleep 10
+                        docker ps -a | grep test-container || echo "Container test completed"
+                        docker stop test-container 2>/dev/null || true
+                        docker rm test-container 2>/dev/null || true
+                    """
+                }
+            }
+        }
+        
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    echo "Logging into Docker Hub..."
+                    sh """
+                        echo \"${env.DOCKER_CREDENTIALS_PSW}\" | docker login -u \"${env.DOCKER_CREDENTIALS_USR}\" --password-stdin ${env.DOCKER_REGISTRY}
+                    """
+                    
+                    echo "Pushing Docker image to Docker Hub..."
+                    sh "docker push ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG}"
+                    sh "docker push ${env.DOCKER_IMAGE_NAME}:${env.TARGET_BRANCH.replace('/', '-')}"
+                    
+                    echo "Logging out from Docker Hub..."
+                    sh "docker logout ${env.DOCKER_REGISTRY}"
+                }
+            }
+            post {
+                success {
+                    echo "✅ Docker image pushed successfully to Docker Hub"
+                    echo "Image: ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG}"
+                }
+                failure {
+                    echo "❌ Docker push failed"
+                }
+            }
+        }
+        
+        stage('Cleanup') {
+            steps {
+                script {
+                    echo "Cleaning up local Docker images to save space..."
+                    sh """
+                        docker rmi ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG} 2>/dev/null || true
+                        docker rmi ${env.DOCKER_IMAGE_NAME}:${env.TARGET_BRANCH.replace('/', '-')} 2>/dev/null || true
+                        docker image prune -f 2>/dev/null || true
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "Pipeline completed for branch: ${env.TARGET_BRANCH}"
+            echo "Docker Image: ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG}"
+            echo "Build URL: ${env.BUILD_URL}"
+        }
+        success {
+            echo "✅ All stages completed successfully!"
+            emailext (
+                subject: "SUCCESS: Pipeline '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: """
+                Pipeline completed successfully!
+                
+                Branch: ${env.TARGET_BRANCH}
+                Docker Image: ${env.DOCKER_IMAGE_NAME}:${params.DOCKER_IMAGE_TAG}
+                Build URL: ${env.BUILD_URL}
+                """,
+                to: "averageheight91@gmail.com"
+            )
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+            emailext (
+                subject: "FAILED: Pipeline '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: """
+                Pipeline failed!
+                
+                Branch: ${env.TARGET_BRANCH}
+                Build URL: ${env.BUILD_URL}
+                
+                Please check the build logs for details.
+                """,
+                to: "averageheight91@gmail.com"
+            )
+        }
+    }
+}

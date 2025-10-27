@@ -1,0 +1,154 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ main, develop, release/* ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main ]
+  # Manual trigger
+  workflow_dispatch:  
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/messaging-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for tags
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          image=moby/buildkit:buildx-stable-1
+        buildkitd-flags: --debug
+
+    - name: Log in to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Extract metadata (tags, labels)
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-
+        labels: |
+          org.opencontainers.image.title=Messaging App
+          org.opencontainers.image.description=A Django-based messaging application
+          org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.version={{version}}
+          org.opencontainers.image.created={{time}}
+          org.opencontainers.image.revision={{sha}}
+          org.opencontainers.image.licenses=MIT
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ../../messaging-app/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+
+    - name: Run vulnerability scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tags }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  test-image:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Pull and test Docker image
+      run: |
+        # Pull the latest image
+        docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        
+        # Test that the container starts
+        docker run --rm -d --name test-app -p 8000:8000 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        sleep 10
+        
+        # Check if container is running
+        docker ps | grep test-app
+        
+        # Test health check endpoint if available
+        curl -f http://localhost:8000/health/ || echo "Health endpoint not available"
+        
+        # Stop container
+        docker stop test-app
+
+    - name: Run container tests
+      run: |
+        # Test with environment variables
+        docker run --rm \
+          -e DJANGO_SETTINGS_MODULE=messaging_app.settings_test \
+          -e DB_HOST=localhost \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          python manage.py check --deploy --fail-level WARNING
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, test-image]
+    if: always()
+
+    steps:
+    - name: Notify on success
+      if: needs.build-and-push.result == 'success' && needs.test-image.result == 'success'
+      run: |
+        echo "✅ Docker image built and pushed successfully!"
+        echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+        echo "Tags: ${{ needs.build-and-push.outputs.tags }}"
+
+    - name: Notify on failure
+      if: needs.build-and-push.result == 'failure' || needs.test-image.result == 'failure'
+      run: |
+        echo "❌ Docker build failed!"
+        exit 1

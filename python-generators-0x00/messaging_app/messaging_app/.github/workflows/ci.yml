@@ -1,0 +1,261 @@
+name: Django CI
+
+on:
+  push:
+    branches: [ main, develop, release/* ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: '3.9'
+  DATABASE_URL: mysql://root:password@127.0.0.1:3306/test_db
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint with flake8
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 flake8-django flake8-black flake8-isort flake8-bugbear
+
+    - name: Run flake8
+      run: |
+        echo "Running flake8 linting..."
+        flake8 . \
+          --count \
+          --show-source \
+          --statistics \
+          --max-complexity=10 \
+          --max-line-length=88 \
+          --extend-ignore=E203,W503 \
+          --exit-zero > flake8_report.txt || true
+        
+        # Display flake8 report
+        echo "=== Flake8 Report ==="
+        cat flake8_report.txt
+        
+        # Fail if there are any errors
+        flake8 . \
+          --count \
+          --max-complexity=10 \
+          --max-line-length=88 \
+          --extend-ignore=E203,W503
+
+    - name: Upload flake8 report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: flake8-lint-report
+        path: flake8_report.txt
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: test_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    strategy:
+      matrix:
+        django-version: [4.2, 5.0]
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
+
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-django pytest-cov coverage mysqlclient
+
+    - name: Wait for MySQL to be ready
+      run: |
+        while ! mysqladmin ping -h"127.0.0.1" -P3306 -uroot -ppassword --silent; do
+          echo "Waiting for MySQL..."
+          sleep 2
+        done
+        echo "MySQL is ready!"
+
+    - name: Create test database
+      run: |
+        mysql -h 127.0.0.1 -P 3306 -u root -ppassword -e "CREATE DATABASE IF NOT EXISTS test_db;"
+        mysql -h 127.0.0.1 -P 3306 -u root -ppassword -e "SHOW DATABASES;"
+
+    - name: Run migrations
+      env:
+        DJANGO_SETTINGS_MODULE: messaging_app.settings_test
+      run: |
+        python manage.py makemigrations --check --dry-run
+        python manage.py migrate
+
+    - name: Run tests with pytest and coverage
+      env:
+        DJANGO_SETTINGS_MODULE: messaging_app.settings_test
+        DB_HOST: 127.0.0.1
+        DB_PORT: 3306
+        DB_NAME: test_db
+        DB_USER: root
+        DB_PASSWORD: password
+      run: |
+        python -m pytest \
+          --cov=./ \
+          --cov-report=term \
+          --cov-report=html:htmlcov \
+          --cov-report=xml:coverage.xml \
+          --cov-report=lcov:coverage.lcov \
+          --junitxml=junit/test-results-${{ matrix.django-version }}.xml \
+          --html=test-reports/report-${{ matrix.django-version }}.html \
+          --self-contained-html \
+          -v
+
+    - name: Generate detailed coverage report
+      if: always()
+      run: |
+        echo "=== Coverage Summary ==="
+        python -m coverage report
+        echo ""
+        echo "=== Coverage HTML Report Generated ==="
+        echo "Check the htmlcov directory for detailed reports"
+
+    - name: Check coverage threshold
+      run: |
+        echo "Checking if coverage meets minimum threshold..."
+        python -m coverage report --fail-under=80
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-py${{ matrix.python-version }}-django${{ matrix.django-version }}
+        path: |
+          junit/test-results-${{ matrix.django-version }}.xml
+          test-reports/
+          htmlcov/
+          coverage.xml
+          coverage.lcov
+
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-reports-py${{ matrix.python-version }}
+        path: |
+          htmlcov/
+          coverage.xml
+          coverage.lcov
+
+    - name: Upload to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: true
+
+  code-quality:
+    runs-on: ubuntu-latest
+    name: Code Quality Checks
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install code quality tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install black isort bandit safety
+
+    - name: Check code formatting with black
+      run: |
+        black --check --diff .
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff .
+
+    - name: Run security scan with bandit
+      run: |
+        bandit -r . -f html -o security-bandit-report.html -ll || true
+
+    - name: Check for vulnerable packages with safety
+      run: |
+        safety check --json --output security-safety-report.json || true
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          security-bandit-report.html
+          security-safety-report.json
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [lint, test, code-quality]
+    if: always()
+    
+    steps:
+    - name: Notify on failure
+      if: needs.lint.result == 'failure' || needs.test.result == 'failure' || needs.code-quality.result == 'failure'
+      run: |
+        echo "❌ CI Pipeline failed!"
+        echo "Lint job: ${{ needs.lint.result }}"
+        echo "Test job: ${{ needs.test.result }}"
+        echo "Code Quality job: ${{ needs.code-quality.result }}"
+        exit 1
+
+    - name: Notify on success
+      if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.code-quality.result == 'success'
+      run: |
+        echo "✅ All CI checks passed!"
+        echo "✓ Flake8 linting passed"
+        echo "✓ All tests passed with coverage"
+        echo "✓ Code quality checks passed"
